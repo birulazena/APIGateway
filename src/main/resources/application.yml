@@ -1,0 +1,39 @@
+spring:
+  cloud:
+    gateway.server.webflux:
+      routes:
+        - id: user-service-users-route
+          uri: http://user-service-app:8080
+          predicates:
+            - Path=/api/v1/users/**
+        - id: user-service-cards-route
+          uri: http://user-service-app:8080
+          predicates:
+            - Path=/api/v1/payment-cards/**
+        - id: authentication-service-route
+          uri: http://auth-service-app:8080
+          predicates:
+            - Path=/api/v1/auth/**
+        - id: order-service-orders-route
+          uri: http://order-service-app:8080
+          predicates:
+            - Path=/api/v1/orders/**
+        - id: order-service-items-route
+          uri: http://order-service-app:8080
+          predicates:
+            - Path=/api/v1/items/**
+        - id: payment-service-route
+          uri: http://payment-service-app:8080
+          predicates:
+            - Path=/api/v1/payments/**
+
+security:
+  jwt:
+    secret: ${JWT_SECRET}
+
+user-service:
+  url: ${USER_SERVICE_URL}
+auth-service:
+  url: ${AUTH_SERVICE_URL}
+frontend:
+  url: ${FRONT_URL}
