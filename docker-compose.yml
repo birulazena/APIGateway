@@ -1,0 +1,185 @@
+services:
+  user-postgres:
+    image: postgres:17.5
+    environment:
+      POSTGRES_DB: ${DB_NAME_USER}
+      POSTGRES_USER: ${DB_USERNAME_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD_USER}
+    volumes:
+      - user_db:/var/lib/postgresql/data
+
+  user-redis:
+    image: redis:8.4
+
+  user-service-app:
+    build: ../UserService
+    depends_on:
+      user-postgres:
+        condition: service_started
+      user-redis:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DB_URL: ${DB_URL_USER}
+      DB_USERNAME: ${DB_USERNAME_USER}
+      DB_PASSWORD: ${DB_PASSWORD_USER}
+      JWT_SECRET: ${JWT_SECRET}
+      REDIS_HOST: ${REDIS_HOST}
+
+  auth-postgres:
+    image: postgres:17.5
+    environment:
+      POSTGRES_DB: ${DB_NAME_AUTH}
+      POSTGRES_USER: ${DB_USERNAME_AUTH}
+      POSTGRES_PASSWORD: ${DB_PASSWORD_AUTH}
+    volumes:
+      - auth_db:/var/lib/postgresql/data
+
+  auth-service-app:
+    build: ../AuthenticationService
+    depends_on:
+      auth-postgres:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DB_URL: ${DB_URL_AUTH}
+      DB_USERNAME: ${DB_USERNAME_AUTH}
+      DB_PASSWORD: ${DB_PASSWORD_AUTH}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ACCESS_EXP: ${JWT_ACCESS_EXP}
+      JWT_REFRESH_EXP: ${JWT_REFRESH_EXP}
+
+  order-postgres:
+    image: postgres:17.5
+    environment:
+      POSTGRES_DB: ${DB_NAME_ORDER}
+      POSTGRES_USER: ${DB_USERNAME_ORDER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD_ORDER}
+    volumes:
+      - order_db:/var/lib/postgresql/data
+
+  order-service-app:
+    build: ../OrderService
+    depends_on:
+      order-postgres:
+        condition: service_started
+      payment-kafka:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DB_URL: ${DB_URL_ORDER}
+      DB_USERNAME: ${DB_USERNAME_ORDER}
+      DB_PASSWORD: ${DB_PASSWORD_ORDER}
+      JWT_SECRET: ${JWT_SECRET}
+      USER_SERVICE_URL: ${USER_SERVICE_URL}
+      KAFKA_TOPIC_PAYMENT_EVENTS_NAME: ${KAFKA_TOPIC_PAYMENT_EVENTS_NAME}
+      KAFKA_ORDER_SERVICE_GROUP: ${KAFKA_ORDER_SERVICE_GROUP}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+
+  payment-mongo:
+    image: mongo:8.2.4
+    container_name: payment-mongo
+    command: [ "bash", "/scripts/mongo-start.sh" ]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME_PAYMENT}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD_PAYMENT}
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE_PAYMENT}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+      - ./scripts/mongo-start.sh:/scripts/mongo-start.sh:ro
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  payment-mongo-setup:
+    image: mongo:8.2.4
+    container_name: payment-mongo-setup
+    depends_on:
+      payment-mongo:
+        condition: service_healthy
+    environment:
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME_PAYMENT}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD_PAYMENT}
+    volumes:
+      - ./scripts/init-replica-set.js:/scripts/init-replica-set.js:ro
+    command: >
+      bash -c "
+      sleep 2 &&
+      mongosh \"mongodb://$$MONGO_ROOT_USERNAME:$$MONGO_ROOT_PASSWORD@payment-mongo:27017/admin\" /scripts/init-replica-set.js
+      "
+
+  payment-kafka:
+    image: apache/kafka:3.9.2
+    container_name: payment-kafka
+    ports:
+      - "9094:9094"
+    environment:
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID_PAYMENT}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@payment-kafka:9093
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://payment-kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: ${KAFKA_AUTO_CREATE_TOPICS_PAYMENT}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_RETENTION_HOURS: ${KAFKA_LOG_RETENTION_HOURS_PAYMENT}
+      KAFKA_LOG_SEGMENT_BYTES: ${KAFKA_LOG_SEGMENT_BYTES_PAYMENT}
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  payment-service-app:
+    build: ../PaymentService
+    depends_on:
+      payment-mongo:
+        condition: service_healthy
+      payment-mongo-setup:
+        condition: service_completed_successfully
+      payment-kafka:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      MONGO_URI: ${MONGO_URI_PAYMENT}
+      RANDOM_NUMBER_URL: ${RANDOM_NUMBER_URL_PAYMENT}
+      KAFKA_TOPIC_PAYMENT_EVENTS_NAME: ${KAFKA_TOPIC_PAYMENT_EVENTS_NAME_PAYMENT}
+      KAFKA_TOPIC_PAYMENT_EVENTS_PARTITIONS: ${KAFKA_TOPIC_PAYMENT_EVENTS_PARTITIONS_PAYMENT}
+      KAFKA_TOPIC_PAYMENT_EVENTS_REPLICAS: ${KAFKA_TOPIC_PAYMENT_EVENTS_REPLICAS_PAYMENT}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+      JWT_SECRET: ${JWT_SECRET}
+#    ports:
+#      - "8084:8080"
+
+  api-gateway-app:
+    build: .
+    depends_on:
+      user-service-app:
+        condition: service_started
+      auth-service-app:
+        condition: service_started
+      order-service-app:
+        condition: service_started
+      payment-service-app:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      USER_SERVICE_URL: ${USER_SERVICE_URL}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+
+volumes:
+  user_db:
+  auth_db:
+  order_db:
+  mongo_data:
+  kafka_data:
